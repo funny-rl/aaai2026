@@ -4,4 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 
-data/solutions/*
+aaai2026/checkpoints/*
+aaai2026/model_output/*
+aaai2026/models/*
+aaai2026/outputs/*
+aaai2026/wandb/*
+aaai2026/reward_model/utils/data/solutions/*
