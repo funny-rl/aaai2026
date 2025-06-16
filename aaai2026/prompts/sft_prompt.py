@@ -29,7 +29,7 @@ def sft_dataset(
             chat_prompt = get_prompt_func(model_name, example["description"])
             
             if use_CoT:
-                pass
+                answer = f"{example['reason']}</think>{json.dumps(example['grammar'], ensure_ascii=False)}"
             else:
                 answer = f"Alright, based on the explanation above, the appropriate grammar for the given last <Specification> is as follows. </think> {json.dumps(example['grammar'], ensure_ascii=False)}"
 

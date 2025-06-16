@@ -61,8 +61,11 @@ actor_rollout_ref:
     ppo_epochs: 1
     shuffle: False
     ulysses_sequence_parallel_size: 1 # sp size
+    entropy_from_logits_with_chunking: False # calculate entropy with chunking to reduce memory peak
+    entropy_checkpointing: False # recompute entropy
     checkpoint:
-      contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      save_contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      load_contents: ${actor_rollout_ref.actor.checkpoint.save_contents} # For more flexibility, you can specify the contents to load from the checkpoint.
     optim:
       lr: 1e-6
       lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
@@ -81,11 +84,13 @@ actor_rollout_ref:
       offload_policy: False # only for fsdp2, offload param\grad\optimizer during train
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+      forward_prefetch: False
   ref:
     strategy: fsdp
     fsdp_config:
       param_offload: False
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
+      forward_prefetch: False
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
@@ -95,6 +100,8 @@ actor_rollout_ref:
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
+    entropy_from_logits_with_chunking: False # calculate entropy with chunking to reduce memory peak
+    entropy_checkpointing: False # recompute entropy
   rollout:
     name: vllm
     mode: sync # sync: LLM, async: AsyncLLM
@@ -139,90 +146,37 @@ actor_rollout_ref:
       enable: False  # should set rollout.name to sglang_async if True
       max_turns: null  # null for no limit (default max_length // 3)
       tool_config_path: null  # null for no tool
-      format: chatml  # chatml, more formats will be supported in the future
+      # null for default callback
+      completion_callback: null
+      # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
+      # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
+      #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
+      use_inference_chat_template: False
 
-critic:
-  rollout_n: ${actor_rollout_ref.rollout.n}
-  strategy: fsdp # [fsdp, fsdp2]
-  optim:
-    lr: 1e-6
-    lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
-    min_lr_ratio: null   # only useful for warmup with cosine
-    warmup_style: constant  # select from constant/cosine
-    total_training_steps: -1  # must be override by program
-    weight_decay: 0.01
-  model:
-    path: ~/models/deepseek-llm-7b-chat
-    tokenizer_path: ${actor_rollout_ref.model.path}
-    override_config: { }
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    enable_gradient_checkpointing: True
-    use_remove_padding: False
-    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
-    fsdp_config:
-      param_offload: False
-      optimizer_offload: False
-      offload_policy: False # only for fsdp2, offload param\grad\optimizer during train
-      reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
-      wrap_policy:
-        # transformer_layer_cls_to_wrap: None
-        min_num_params: 0
-      fsdp_size: -1
-  ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
-  ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
-  ppo_micro_batch_size_per_gpu: null
-  forward_micro_batch_size: ${critic.ppo_micro_batch_size}
-  forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu}
-  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
-  ppo_max_token_len_per_gpu: 32768 # (${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}) * 2
-  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
-  ulysses_sequence_parallel_size: 1 # sp size
-  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
-  shuffle: ${actor_rollout_ref.actor.shuffle}
-  grad_clip: 1.0
-  cliprange_value: 0.5
-  checkpoint:
-    contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      # Tokenization is performed turn by turn and the resulting token ids are concatenated to form the full conversation.
+      # To ensure this matches the result of tokenizing the entire conversation at once, a sanity check is run at the end of each multi-turn rollout to compare the two sets of token ids.
+      # Some models are known to produce different tokenization results when tokenizing turn by turn vs. all at once. aThis behavior has already been validated for them.
+      # To reduce excessive warnings, you can turn off the sanity check for these models if you are using their default chat template:
+      # Qwen/QwQ-32B, Qwen/Qwen3-xxB
+      enable_tokenization_sanity_check: True
 
-reward_model:
-  enable: False
-  strategy: fsdp
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    use_remove_padding: False
-    trust_remote_code: False
-    fsdp_config:
-      wrap_policy:
-        min_num_params: 0
-      param_offload: False
-      reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
-      fsdp_size: -1
-  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
-  micro_batch_size_per_gpu: null # set a number
-  max_length: null
-  ulysses_sequence_parallel_size: 1 # sp size
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
-  launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
-  sandbox_fusion:
-    url: null # faas url to run code in cloud sandbox
-    max_concurrent: 64 # max concurrent requests to sandbox
-
+# config for the algorithm
 algorithm:
-  gamma: 1.0
-  lam: 1.0
-  adv_estimator: grpo
-  norm_adv_by_std_in_grpo: True
-  use_kl_in_reward: False
-  kl_penalty: kl  # how to estimate kl divergence
-  kl_ctrl:
-    type: fixed
-    kl_coef: 0.001
-    horizon: 10000
-    target_kl: 0.1
+  gamma: 1.0  # Discount factor for future rewards
+  lam: 1.0 # Trade-off between bias and variance in the GAE estimator
+  adv_estimator: grpo # Advantage estimation method: "gae", "td", or "td_lambda"
+  norm_adv_by_std_in_grpo: True # Whether to normalize advantages by std (specific to GRPO)
+  use_kl_in_reward: False # Whether to enable in-reward KL penalty
+  kl_penalty: kl # How to estimate KL divergence: "kl", "abs", "mse", "low_var_kl", or "full"
+  kl_ctrl: # KL control configuration
+    type: fixed # KL control type: "fixed" or "adaptive"
+    kl_coef: 0.001 # Initial coefficient for KL penalty
+    horizon: 10000 # Horizon value for adaptive controller (if enabled)
+    target_kl: 0.1 # Target KL divergence (used for adaptive controller)
+  use_pf_ppo: False # Whether to enable preference feedback PPO
+  pf_ppo: # Preference feedback PPO settings
+    reweight_method: pow # Method for reweighting samples: "pow", "max_min", or "max_random"
+    weight_pow: 2.0 # Power used for weight scaling in "pow" method
 
 trainer:
   balance_batch: True
@@ -250,6 +204,89 @@ trainer:
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
+  device: cuda
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  timeline_json_file: null  # Path to save Ray timeline JSON for performance profiling
+
+
+
+critic:
+  rollout_n: ${actor_rollout_ref.rollout.n} # Number of rollouts per update (mirrors actor rollout_n)
+  strategy: fsdp # fsdp or fsdp2 strategy used for critic model training
+  optim: # optimizer configs
+    lr: 1e-5 # Learning rate
+    lr_warmup_steps_ratio: 0. # Warmup steps ratio; total steps will be injected at runtime
+    min_lr_ratio: null # Minimum LR ratio for cosine schedule
+    warmup_style: constant # LR warmup style: "constant" or "cosine"
+    total_training_steps: -1 # Total training steps (must be overridden at runtime)
+    weight_decay: 0.01 # Weight decay
+  model: # model config for the critic
+    path: ~/models/deepseek-llm-7b-chat # Path to pretrained model weights
+    use_shm: False # Whether to use shared memory for loading the model
+    tokenizer_path: ${actor_rollout_ref.model.path} # Tokenizer path (defaults to actor's model path)
+    override_config: { } # Hugging Face config override
+    external_lib: ${actor_rollout_ref.model.external_lib} # External model implementation (optional)
+    enable_gradient_checkpointing: True # Enable gradient checkpointing to save memory
+    enable_activation_offload: False # Offload activations to CPU to reduce GPU memory usage
+    use_remove_padding: False # Use remove padding optimization (saves compute)
+    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code} # Whether to trust remote code from Hugging Face models
+    fsdp_config: # FSDP-specific config
+      param_offload: False # Whether to offload model parameters to CPU
+      optimizer_offload: False # Whether to offload optimizer state to CPU
+      offload_policy: False # Only for FSDP2: offload param/grad/optimizer during train
+      reshard_after_forward: True # Only for FSDP2: Reshard after forward pass to reduce memory footprint
+      wrap_policy: # Policy for wrapping layers with FSDP
+        min_num_params: 0 # Minimum number of parameters to trigger wrapping
+      fsdp_size: -1 # Number of GPUs in each FSDP shard group; -1 means auto
+      forward_prefetch: False # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather # before the current forward computation.
+    lora_rank: 0 # Set to positive value to enable LoRA (e.g., 32)
+    lora_alpha: 16 # LoRA scaling factor
+    target_modules: all-linear # LoRA target modules: "all-linear" or list of linear projection layers
+  ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size} # PPO mini-batch size per update
+  ppo_micro_batch_size: null # [Deprecated] Global micro batch size
+  ppo_micro_batch_size_per_gpu: null # Local per-GPU micro batch size
+  forward_micro_batch_size: ${critic.ppo_micro_batch_size} # Forward-only batch size (global)
+  forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu} # Forward-only batch size (per GPU)
+  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz} # Whether to automatically adjust batch size at runtime
+  ppo_max_token_len_per_gpu: 32768 # Max tokens per GPU in one PPO batch (doubled for critic)
+  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu} # Max token length per GPU in forward pass
+  ulysses_sequence_parallel_size: 1 # Sequence parallelism size for Ulysses-style model parallelism
+  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs} # Number of PPO epochs per batch
+  shuffle: ${actor_rollout_ref.actor.shuffle} # Shuffle training data across PPO epochs
+  grad_clip: 1.0 # Gradient clipping for critic updates
+  cliprange_value: 0.5 # PPO value function clipping range
+  loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode} # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
+  checkpoint: # checkpoint configs
+    save_contents: ['model', 'optimizer', 'extra'] # What to include in saved checkpoints # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+    load_contents: ${critic.checkpoint.save_contents} # What to include when loading checkpoints
+reward_model: # configs for the reward model
+  enable: False # Whether to enable reward model. If False, we compute the reward only with the user-defined reward functions. # In GSM8K and Math examples, we disable reward model. # For RLHF alignment example using full_hh_rlhf, we utilize reward model to assess the responses. # If False, the following parameters are not effective
+  strategy: fsdp # FSDP strategy: "fsdp" or "fsdp2"
+  model: # model config for reward scoring
+    input_tokenizer: ${actor_rollout_ref.model.path} # Input tokenizer. If the reward model’s chat template is inconsistent with the policy, # we need to first decode to plaintext, then apply the rm’s chat_template. # Then score with RM. If chat_templates are consistent, it can be set to null.
+    path: ~/models/FsfairX-LLaMA3-RM-v0.1 # RM’s HDFS path or local path. Note that RM only supports AutoModelForSequenceClassification. # Other model types need to define their own RewardModelWorker and pass it from the code.
+    use_shm: False # Whether to use shared memory for loading the model
+    external_lib: ${actor_rollout_ref.model.external_lib} # External model implementation (optional)
+    use_remove_padding: False # Use remove padding optimization (saves compute)
+    use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels} # Whether to use fused reward kernels for speedup
+    trust_remote_code: False # Whether to enable loading a remote code model, default to False
+    fsdp_config: # FSDP-specific config
+      wrap_policy: # Policy for wrapping layers with FSDP
+        min_num_params: 0 # Minimum number of parameters to trigger wrapping
+      param_offload: False # Whether to offload model parameters to CPU
+      reshard_after_forward: True # Only for FSDP2: Reshard after forward pass to reduce memory footprint
+      fsdp_size: -1 # Number of GPUs in each FSDP shard group; -1 means auto
+      forward_prefetch: False # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather # before the current forward computation.
+  micro_batch_size: null # [Deprecated] Global micro batch size
+  micro_batch_size_per_gpu: null # Local per-GPU micro batch size
+  max_length: null # Maximum sequence length to process for scoring
+  ulysses_sequence_parallel_size: 1 # Sequence parallelism size for Ulysses-style model parallelism
+  use_dynamic_bsz: ${critic.use_dynamic_bsz} # Whether to dynamically adjust batch size at runtime
+  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu} # Maximum number of tokens per GPU in one forward pass
+  reward_manager: naive # Reward Manager. This defines the mechanism of computing rule-based reward and handling different reward sources. # Default is naive. If all verification functions are multiprocessing-safe, # the reward manager can be set to prime for parallel verification.
+  launch_reward_fn_async: False # Whether to launch custom reward function asynchronously during log_prob
+  sandbox_fusion: # Cloud/local sandbox fusion configuration for custom reward logic
+    url: null # Cloud/local function URL for sandbox execution
+    max_concurrent: 64 # Max concurrent requests allowed to sandbox

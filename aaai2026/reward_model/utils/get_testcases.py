@@ -43,7 +43,7 @@ def get_testcase(
     """
     throw: Error
     """
-    
+
     @timeout_decorator.timeout(timeout) 
     def _generate(degree: int) -> str:
         return ccfg.generate(degree=degree)  
@@ -76,11 +76,9 @@ def get_testcase(
 
 def get_testcases(
         data: dict[str, str],
-        name: str,
         num_testcase: int,
-        n_testcode: int,
         timeout: int, 
-    )-> Optional[tuple[list[str], list[int]]]:
+    ) ->  List[str]:
     
     productions = data["productions"]
     constraints = data["constraints"]
@@ -102,14 +100,18 @@ def get_testcases(
     tuples += get_testcase(ccfg, timeout, 2, num_testcase-1)
     tuples += get_testcase(ccfg, timeout, 1, num_testcase)
     testcases: List[str] = [t[0] for t in tuples]
-    
-    timeout = 2 * timeout_dict[name]
-    
-    validity, effectiveness = efficiency_score(
+    return testcases
+
+def get_efficiency_score(
+        name: str,
+        testcases: List[str],
+        n_testcode: int,
+)-> tuple[float, float, int, int]:
+    validity, effectiveness, n_correct_solution, n_incorrect_solution = efficiency_score(
         name = name,
         n_sample = n_testcode,
         testcases = testcases,
-        timeout = timeout,
+        timeout = timeout_dict[name],
     )
-    return validity, effectiveness
+    return validity, effectiveness, n_correct_solution, n_incorrect_solution
 

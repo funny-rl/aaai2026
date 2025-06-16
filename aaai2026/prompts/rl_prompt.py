@@ -19,8 +19,8 @@ def rl_dataset(
         }
     )
     
-    train_dataset = dataset['train']
-    valid_dataset = dataset["valid"]
+    train_dataset = dataset['train'].shuffle(seed=42)
+    valid_dataset = dataset["valid"].shuffle(seed=42)
     
     def make_map_fn(split):
         def process_fn(example, idx):
@@ -43,5 +43,12 @@ def rl_dataset(
 
     train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True)
     valid_dataset = valid_dataset.map(function=make_map_fn('valid'), with_indices=True)
-    train_dataset.to_parquet(os.path.join(parquet_path, 'train.parquet'))
-    valid_dataset.to_parquet(os.path.join(parquet_path, 'valid.parquet'))
+    
+    train_parquet_file = os.path.join(parquet_path, 'train.parquet')
+    valid_parquet_file = os.path.join(parquet_path, 'valid.parquet')
+    if os.path.exists(train_parquet_file):
+        os.remove(train_parquet_file)
+        train_dataset.to_parquet(train_parquet_file)
+    if os.path.exists(valid_parquet_file):
+        os.remove(valid_parquet_file)
+        valid_dataset.to_parquet(valid_parquet_file)

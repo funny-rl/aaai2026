@@ -1,5 +1,5 @@
 data:
-  train_batch_size: 16
+  train_batch_size: 8
   micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
   micro_batch_size_per_gpu: 2  # this is also val batch size
   train_files: null
@@ -50,7 +50,7 @@ trainer:
   resume_path: null
   project_name: Grammar_Generation
   experiment_name: SFT
-  total_epochs: 10
+  total_epochs: 5
   total_training_steps: null
   logger: ['console', 'wandb']
   seed: 1

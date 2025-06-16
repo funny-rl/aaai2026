@@ -91,7 +91,8 @@ def main_task(config):
     total_samples = len(dataset)
     config_batch_size = config.data.batch_size
     num_batch = -(-total_samples // config_batch_size)
-    output_lst = [[] for _ in range(config.data.n_samples)]
+    reasoning_list = [[] for _ in range(config.data.n_samples)]
+    grammar_list = [[] for _ in range(config.data.n_samples)]
 
     for batch_idx in range(num_batch):
         print(f"[{batch_idx + 1}/{num_batch}] Start to process.")
@@ -119,34 +120,46 @@ def main_task(config):
         for n_sample in range(config.data.n_samples):
             output_padded = wg.generate_sequences(data_padded)
             output = unpad_dataproto(output_padded, pad_size=pad_size)
-            output_texts = []
+            grammar_texts = []
+            reasoning_texts = []
             for i in range(len(output)): # len(output) -> batch_size x n
                 data_item = output[i]
                 prompt_length = data_item.batch["prompts"].shape[-1]
                 valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
                 valid_response_ids = data_item.batch["responses"][:valid_response_length]
-                response_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+                grammar_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
                 
-                think_end_index = response_str.find("</think>")
+                think_end_index = grammar_str.find("</think>")
                 if think_end_index != -1:
-                    response_str = response_str[think_end_index + len("</think>"):].lstrip() # 앞의 공백 제거
-            
-                print(f"Response {i}: {response_str}")
-                
+                    reasoning = grammar_str[:think_end_index + len("</think>")]
+                    grammar_str = grammar_str[think_end_index + len("</think>"):].lstrip() 
+                    
                 try:
-                    output_texts.append(ast.literal_eval(response_str))
+                    grammar_texts.append(ast.literal_eval(grammar_str))
+                    reasoning_texts.append(reasoning)
+                    print(f"Response {i}: {reasoning}")
+                    print(f"Response {i}: {grammar_str}")
                 except:
-                    output_texts.append(response_str)
-            output_lst[n_sample].extend(output_texts)
+                    grammar_texts.append(grammar_str)
+                    reasoning_texts.append("Error")
+                    print(f"[Error] Unable to parse grammar: {grammar_str}")
+                
+                    
+            grammar_list[n_sample].extend(grammar_texts)
+            reasoning_list[n_sample].extend(reasoning_texts)
 
-    # convert output_lst from (n_samples, n_data) to (n_data, n_sampels)
-    output_lst = np.array(output_lst, dtype=object)
-    output_lst = np.transpose(output_lst, axes=(1, 0)).tolist()
+    # convert grammar_list from (n_samples, n_data) to (n_data, n_sampels)
+    grammar_list = np.array(grammar_list, dtype=object)
+    grammar_list = np.transpose(grammar_list, axes=(1, 0)).tolist()
+    
+    reasoning_list = np.array(reasoning_list, dtype=object)
+    reasoning_list = np.transpose(reasoning_list, axes=(1, 0)).tolist()
 
     # add to the data frame
-    dataset["grammar"] = output_lst
+    dataset["grammar"] = grammar_list
+    dataset["reasoning"] = reasoning_list
     
-    columns_to_keep = ['name', 'description', 'grammar']
+    columns_to_keep = ['name', 'description', 'grammar', 'reasoning']
     existing_columns_to_keep = [col for col in columns_to_keep if col in dataset.columns]
     dataset = dataset[existing_columns_to_keep]
 

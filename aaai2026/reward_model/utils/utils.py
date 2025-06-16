@@ -1,5 +1,6 @@
 import re
 import os
+import time
 import random 
 import tempfile
 import itertools
@@ -7,6 +8,7 @@ import py_compile
 import subprocess
 from pathlib import Path
 from itertools import chain
+import numpy as np
 from typing import IO, Optional, TypedDict
 
 from pathos.multiprocessing import ProcessingPool as Pool
@@ -29,8 +31,10 @@ def extract_solution(solution_str: str) -> str | None:
     think_token_occurrences = re.findall(r'</think>', solution_str)
     if len(think_token_occurrences) != 1:
         return None
-    match = re.search(r'</think>(.*)', solution_str)
-    return match.group(1)
+    match = re.search(r'</think>(.+)', solution_str)
+    if match and match.group(1).strip():
+        return match.group(1)
+    return None
 
 class ExecutionResultPerTestcase(TypedDict):
     """ExecutionResultPerTestcase is a dictionary that contains the results of
@@ -41,40 +45,6 @@ class ExecutionResultPerTestcase(TypedDict):
     incorrect_outputs: list[Optional[str]]
     correct_solutions: list[str]
     incorrect_solutions: list[str]
-
-def run_testcase(
-    temp_file: IO[bytes],
-    solutions: list[Path],
-    timeout: int,
-) -> list[Optional[str]]:
-    position = temp_file.tell()
-    temp_file.seek(0)
-    outputs = [
-        get_stdout(solution, temp_file, timeout) for solution in solutions
-    ]
-    temp_file.seek(position)
-    return outputs
-
-def get_stdout(
-    python_file: Path, stdin: IO[bytes], timeout: int
-) -> Optional[str]:
-    stream_position = stdin.tell()
-    try:
-        process = subprocess.run(
-            ["python", str(python_file)],
-            capture_output=True,
-            stdin=stdin,
-            timeout=timeout,
-            text=True,
-            check=True,
-        )
-        stdin.seek(stream_position)
-        if process.returncode != 0:
-            return None
-    except Exception as e:
-        return None
-
-    return " ".join(process.stdout.split()).lower()
 
 def get_mode(xs: list[str]) -> tuple[str, int]:
     groupby_iterable = itertools.groupby(sorted(xs))
@@ -130,8 +100,12 @@ def sample_solutions(
     name: str,
     num_sample: int = 20,
     correctness: str = "correct",
-) -> list[Path]:
-    
+) -> tuple[list[Path], int]:
+    """
+    return only the Compilable solutions.
+    if num_sample is larger than the number of compilable solutions, 
+    it will return only compilable solutions.
+    """
     if correctness == "correct":
         solutions_dir = Path(CORRECT_SOLUTIONS_DIR) / name
     elif correctness == "incorrect":
@@ -141,34 +115,62 @@ def sample_solutions(
     solutions = list(solutions_dir.glob("*.py"))
     if len(solutions) < 1:
         raise ValueError(f"No solutions found for {name} in {correctness} directory")
-    num_sample = min(num_sample, len(solutions))
-    return random.sample(solutions, num_sample)
-
-def test_testcase(args: tuple[str, list[Path], list[Path], int]) -> dict[str, list[str]]:
+    total_sample = min(num_sample, len(solutions))
     
-    testcase, correct_solutions, incorrect_solutions, timeout = args 
+    tried_solutions = set()
+    n_sample:int = total_sample
+    complied_solutions = []
     
-    temp_file = tempfile.TemporaryFile("w+b")
-    temp_file.write(testcase.encode("utf-8"))
-    temp_file.flush()
+    sol_set = set(solutions)
+    with Pool() as compile_pool:
+        while len(complied_solutions) < total_sample:
+            
+            untried_solutions = list(sol_set - tried_solutions)
+            if len(untried_solutions) < 1:
+                break
+            if len(untried_solutions) < n_sample:
+                n_solution = len(untried_solutions)
+            else:
+                n_solution = n_sample
+            sampled_solution = random.sample(untried_solutions, n_solution)
+                
+            compiled_flags = list(compile_pool.map(precompile_solution, sampled_solution))
+            tried_solutions.update(sampled_solution)
+            for idx, sol in enumerate(sampled_solution):
+                if compiled_flags[idx]:
+                    complied_solutions.append(sol)
+                    n_sample -= 1
+    if len(complied_solutions) < 1:
+        raise ValueError(f"No compilable solutions found for {name} in {correctness} directory")
+    
+    return complied_solutions, len(complied_solutions)
 
-    correct_outputs = run_testcase(temp_file, correct_solutions, timeout)
-    incorrect_outputs = run_testcase(temp_file, incorrect_solutions, timeout)
-    temp_file.close()
+def get_stdout(
+    python_file: Path, 
+    testcase_str: str, 
+    timeout: int
+) -> Optional[str]:
+    try:
+        process = subprocess.run(
+            ["python", str(python_file)],
+            capture_output=True,
+            input=testcase_str,
+            timeout=timeout,
+            text=True,
+            check=True,
+        )
+        if process.returncode != 0:
+            return None
+    except Exception as e:
+        return None
 
-    filtered_correct_outputs = [o for o in correct_outputs if o is not None]
-    if not filtered_correct_outputs:
-        return f"[Empty Error] No valid correct outputs"
-    if len(set(filtered_correct_outputs)) > 1:
-        return f"[Mismatch Error] Correct outputs"
+    return " ".join(process.stdout.split()).lower()
 
-    result_per_testcase = ExecutionResultPerTestcase(
-        correct_outputs=correct_outputs,
-        incorrect_outputs=incorrect_outputs,
-        correct_solutions=[str(e.name) for e in correct_solutions],
-        incorrect_solutions=[str(e.name) for e in incorrect_solutions],
-    )
-    return result_per_testcase
+def test_pairs(
+    args: tuple[str, Path, int]
+):
+    testcase, solution, timeout = args 
+    return get_stdout(solution, testcase, timeout)
 
 def efficiency_score(
     name: str,
@@ -176,43 +178,62 @@ def efficiency_score(
     testcases: list[str],
     timeout: int,
 ):
-    correct_solutions = sample_solutions(
+    correct_solutions, n_correct_solution = sample_solutions(
         name = name,
-        num_sample = n_sample,
+        num_sample = n_sample, 
         correctness = "correct"
     )
-    incorrect_solutions = sample_solutions(
+    incorrect_solutions, n_incorrect_solution = sample_solutions(
         name = name,
         num_sample = n_sample,
         correctness = "incorrect"
     )
+    num_testcase = len(testcases)
     all_solutions = list(chain(correct_solutions, incorrect_solutions))
-    
-    with Pool() as compile_pool:
-        compiled_flags = compile_pool.uimap(precompile_solution, all_solutions)
-    
-    if not all([f for f in compiled_flags]):
-        print(f"[Abort] Compilation failed for some solutions in problem {name}")
-        return 0, 0
-    
-    args: list[tuple[str, list[Path], list[Path]]] = [
-        (
-            tc,
-            correct_solutions,
-            incorrect_solutions,
-            timeout
-        )
-        for tc in testcases
-    ]
+    tc_sol_pairs = list(itertools.product(testcases, all_solutions))
+    all_args = [(*pair, timeout) for pair in tc_sol_pairs]
     
     with Pool() as test_tc:
-        test_result = test_tc.uimap(
-            test_testcase,
-            args,
+        test_result = test_tc.map(
+            test_pairs,
+            all_args,
         )
-    results = [r for r in test_result]
-    for r in results:
-        if "Error" in r:
-            return 0, 0
+        test_result = list(test_result)
+    
+    assert len(test_result) == num_testcase * len(all_solutions), \
+        f"Expected {num_testcase * len(all_solutions)} results, got {len(test_result)}"
+        
+    n_solution = n_correct_solution + n_incorrect_solution
+    testcase_outputs = [test_result[i:i + n_solution] for i in range(0, len(test_result), n_solution)]
+    
+    assert len(testcase_outputs) == num_testcase, \
+        f"Length of correct outputs and incorrect outputs must match: {len(testcase_outputs)} != {num_testcase}"
+
+    results = []
+    for testcase_output in testcase_outputs:
+        tc_correct_output = testcase_output[:n_correct_solution]
+        tc_incorrect_output = testcase_output[n_correct_solution:]
+        
+        assert len(tc_correct_output) == n_correct_solution, \
+            f"Length of correct outputs must match: {len(tc_correct_output)} != {n_correct_solution}"
+        assert len(tc_incorrect_output) == n_incorrect_solution, \
+            f"Length of incorrect outputs must match: {len(tc_incorrect_output)} != {n_incorrect_solution}"
+        filtered_correct_outputs = [o for o in tc_correct_output if o is not None]
+        
+        if not filtered_correct_outputs:
+            print("[Empty Error] No valid correct outputs")
+            return 0, 0, n_correct_solution, n_incorrect_solution
+        if len(set(filtered_correct_outputs)) > 1:
+            print("[Mismatch Error] Multiple correct outputs found")
+            return 0, 0, n_correct_solution, n_incorrect_solution
+
+        result_per_testcase = ExecutionResultPerTestcase(
+            correct_outputs=tc_correct_output,
+            incorrect_outputs=tc_incorrect_output,
+            correct_solutions=[str(e.name) for e in correct_solutions],
+            incorrect_solutions=[str(e.name) for e in incorrect_solutions],
+        )
+        results.append(result_per_testcase)
+    
     effectiveness = summarize_and_score(results)
-    return 1, effectiveness
+    return 1.0, effectiveness, n_correct_solution, n_incorrect_solution
