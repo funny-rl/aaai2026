@@ -60,7 +60,7 @@ def get_custom_reward_fn(config):
 def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     """
     Load and initialize a reward manager based on the configuration.
-
+    
     Args:
         config: PPO trainer configuration object containing reward_model fields.
         tokenizer: Tokenizer object used for processing text.

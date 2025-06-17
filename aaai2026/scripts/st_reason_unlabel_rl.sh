@@ -2,7 +2,7 @@
 
 set -x
 
-temperature=1.0
+temperature=0.9
 top_p=1.0
 batch_size_per_gpu=2
 dataset="unlabel"

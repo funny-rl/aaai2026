@@ -3,29 +3,91 @@ import os
 import time
 import random 
 import tempfile
+import jsonlines
 import itertools
 import py_compile
 import subprocess
 from pathlib import Path
 from itertools import chain
-import numpy as np
+from tqdm import tqdm
 from typing import IO, Optional, TypedDict
-
 from pathos.multiprocessing import ProcessingPool as Pool
-
-# SOLUTIONS_DIR = os.getenv("SOLUTIONS_DIR")
-# if SOLUTIONS_DIR is None:
-#     raise ValueError("Environment variable SOLUTIONS_DIR is not set")
-# CORRECT_SOLUTIONS_DIR = os.getenv("CORRECT_SOLUTIONS_DIR")
-# if CORRECT_SOLUTIONS_DIR is None:
-#     raise ValueError("Environment variable CORRECT_SOLUTIONS_DIR is not set")
-# INCORRECT_SOLUTIONS_DIR = os.getenv("INCORRECT_SOLUTIONS_DIR")
-# if INCORRECT_SOLUTIONS_DIR is None:
-#     raise ValueError("Environment variable INCORRECT_SOLUTIONS_DIR is not set")
 
 SOLUTIONS_DIR = "reward_model/utils/data/solutions"
 CORRECT_SOLUTIONS_DIR = f"{SOLUTIONS_DIR}/solutions"
 INCORRECT_SOLUTIONS_DIR = f"{SOLUTIONS_DIR}/incorrect_solutions"
+PUBLIC_TESTCASE_DIR = "reward_model/utils/data/testcase/code-contest/public/test.jsonl"
+
+n_samples = 20
+timeout_dict: dict[str, int] = {}
+correct_solution_dict: dict[str, list[str]] = {}
+incorrect_solution_dict: dict[str, list[str]] = {}
+
+def precompile_solution(solution_path: Path) -> bool:
+    try:
+        py_compile.compile(str(solution_path), doraise=True)
+        return True
+    except py_compile.PyCompileError as e:
+        #print(f"[CompileError] {solution_path.name}: {e}")
+        return False
+
+def sample_solutions(
+    name: str,
+    num_sample: int,
+    correctness: str = "correct",
+) -> tuple[list[Path], int]:
+    """
+    return only the Compilable solutions.
+    if num_sample is larger than the number of compilable solutions, 
+    it will return only compilable solutions.
+    """
+    if correctness == "correct":
+        solutions_dir = Path(CORRECT_SOLUTIONS_DIR) / name
+    elif correctness == "incorrect":
+        solutions_dir = Path(INCORRECT_SOLUTIONS_DIR) / name
+    else:
+        raise ValueError("Correctness must be either 'correct' or 'incorrect'")
+    solutions = list(solutions_dir.glob("*.py"))
+    if len(solutions) < 1:
+        raise ValueError(f"No solutions found for {name} in {correctness} directory")
+    total_sample = min(num_sample, len(solutions))
+    
+    tried_solutions = set()
+    n_sample:int = total_sample
+    complied_solutions = []
+    
+    sol_set = set(solutions)
+    with Pool() as compile_pool:
+        while len(complied_solutions) < total_sample:
+            untried_solutions = list(sol_set - tried_solutions)
+            if len(untried_solutions) < 1:
+                break
+            if len(untried_solutions) < n_sample:
+                n_solution = len(untried_solutions)
+            else:
+                n_solution = n_sample
+            sampled_solution = random.sample(untried_solutions, n_solution)    
+            compiled_flags = list(compile_pool.map(precompile_solution, sampled_solution))
+            tried_solutions.update(sampled_solution)
+            for idx, sol in enumerate(sampled_solution):
+                if compiled_flags[idx]:
+                    complied_solutions.append(sol)
+                    n_sample -= 1
+
+    if len(complied_solutions) < 1:
+        raise ValueError(f"No compilable solutions found for {name} in {correctness} directory")
+    
+    return complied_solutions
+
+public_dataset = jsonlines.open(PUBLIC_TESTCASE_DIR, 'r')
+with jsonlines.open(PUBLIC_TESTCASE_DIR, 'r') as public_dataset:
+    for data in public_dataset:
+        timeout_dict[data["name"]] = max(
+            1,
+            int(
+                data["time_limit"]["seconds"] + data["time_limit"]["nanos"] / 1e9
+            )
+        )
 
 def extract_solution(solution_str: str) -> str | None:
     think_token_occurrences = re.findall(r'</think>', solution_str)
@@ -70,14 +132,6 @@ def summarize_and_score(results: list[ExecutionResultPerTestcase]) -> float:
             total_incorrect_flags[i] &= (o == answer)
 
     return 1.0 - sum(total_incorrect_flags) / len(total_incorrect_flags)
-
-def precompile_solution(solution_path: Path) -> bool:
-    try:
-        py_compile.compile(str(solution_path), doraise=True)
-        return True
-    except py_compile.PyCompileError as e:
-        #print(f"[CompileError] {solution_path.name}: {e}")
-        return False
     
 
 def is_invalid_terminal(s: str) -> bool:
@@ -95,55 +149,6 @@ def is_invalid_terminal(s: str) -> bool:
             ]
         )
     )
-
-def sample_solutions(
-    name: str,
-    num_sample: int = 20,
-    correctness: str = "correct",
-) -> tuple[list[Path], int]:
-    """
-    return only the Compilable solutions.
-    if num_sample is larger than the number of compilable solutions, 
-    it will return only compilable solutions.
-    """
-    if correctness == "correct":
-        solutions_dir = Path(CORRECT_SOLUTIONS_DIR) / name
-    elif correctness == "incorrect":
-        solutions_dir = Path(INCORRECT_SOLUTIONS_DIR) / name
-    else:
-        raise ValueError("Correctness must be either 'correct' or 'incorrect'")
-    solutions = list(solutions_dir.glob("*.py"))
-    if len(solutions) < 1:
-        raise ValueError(f"No solutions found for {name} in {correctness} directory")
-    total_sample = min(num_sample, len(solutions))
-    
-    tried_solutions = set()
-    n_sample:int = total_sample
-    complied_solutions = []
-    
-    sol_set = set(solutions)
-    with Pool() as compile_pool:
-        while len(complied_solutions) < total_sample:
-            
-            untried_solutions = list(sol_set - tried_solutions)
-            if len(untried_solutions) < 1:
-                break
-            if len(untried_solutions) < n_sample:
-                n_solution = len(untried_solutions)
-            else:
-                n_solution = n_sample
-            sampled_solution = random.sample(untried_solutions, n_solution)
-                
-            compiled_flags = list(compile_pool.map(precompile_solution, sampled_solution))
-            tried_solutions.update(sampled_solution)
-            for idx, sol in enumerate(sampled_solution):
-                if compiled_flags[idx]:
-                    complied_solutions.append(sol)
-                    n_sample -= 1
-    if len(complied_solutions) < 1:
-        raise ValueError(f"No compilable solutions found for {name} in {correctness} directory")
-    
-    return complied_solutions, len(complied_solutions)
 
 def get_stdout(
     python_file: Path, 
@@ -174,20 +179,30 @@ def test_pairs(
 
 def efficiency_score(
     name: str,
-    n_sample: int,
     testcases: list[str],
-    timeout: int,
 ):
-    correct_solutions, n_correct_solution = sample_solutions(
-        name = name,
-        num_sample = n_sample, 
-        correctness = "correct"
-    )
-    incorrect_solutions, n_incorrect_solution = sample_solutions(
-        name = name,
-        num_sample = n_sample,
-        correctness = "incorrect"
-    )
+    timeout = timeout_dict[name]
+    
+    if name in correct_solution_dict and name in incorrect_solution_dict:
+        correct_solutions = correct_solution_dict[name]
+        incorrect_solutions = incorrect_solution_dict[name]
+    else:
+        correct_solutions = sample_solutions(
+            name=name,
+            num_sample=n_samples,
+            correctness="correct"
+        )
+        incorrect_solutions = sample_solutions(
+            name=name,
+            num_sample=n_samples,
+            correctness="incorrect"
+        )
+        correct_solution_dict[name] = correct_solutions
+        incorrect_solution_dict[name] = incorrect_solutions
+    
+    n_correct_solution = len(correct_solutions)
+    n_incorrect_solution = len(incorrect_solutions)
+
     num_testcase = len(testcases)
     all_solutions = list(chain(correct_solutions, incorrect_solutions))
     tc_sol_pairs = list(itertools.product(testcases, all_solutions))
@@ -234,6 +249,8 @@ def efficiency_score(
             incorrect_solutions=[str(e.name) for e in incorrect_solutions],
         )
         results.append(result_per_testcase)
-    
+
     effectiveness = summarize_and_score(results)
     return 1.0, effectiveness, n_correct_solution, n_incorrect_solution
+
+

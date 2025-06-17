@@ -1,9 +1,7 @@
 import re
 import os 
-import jsonlines
 from typing import List
 import timeout_decorator
-from typing import Optional
 from pathos.multiprocessing import ProcessingPool as Pool
 
 from reward_model.utils.grammar.counting_context_free_grammar import CountingContextFreeGrammar as Ccfg
@@ -20,30 +18,12 @@ warnings.filterwarnings("ignore")
 # if PUBLIC_TESTCASE_DIR is None:
 #     raise ValueError("Environment variable PUBLIC_TESTCASE_DIR is not set")
 
-PUBLIC_TESTCASE_DIR = "reward_model/utils/data/testcase/code-contest/public/test.jsonl"
-
-public_dataset = jsonlines.open(PUBLIC_TESTCASE_DIR, 'r')
-with jsonlines.open(PUBLIC_TESTCASE_DIR, 'r') as public_dataset:
-    timeout_dict: dict[str, int] = {
-        data["name"]: max(
-            1,
-            int(
-                data["time_limit"]["seconds"] + data["time_limit"]["nanos"] / 1e9
-            )
-        )
-        for data in public_dataset
-    }
-
 def get_testcase(
     ccfg: Ccfg,
     timeout: int,
     min_degree: int,
     num_testcase: int,
 ) -> list[tuple[str, int]]:
-    """
-    throw: Error
-    """
-
     @timeout_decorator.timeout(timeout) 
     def _generate(degree: int) -> str:
         return ccfg.generate(degree=degree)  
@@ -105,13 +85,29 @@ def get_testcases(
 def get_efficiency_score(
         name: str,
         testcases: List[str],
-        n_testcode: int,
-)-> tuple[float, float, int, int]:
+) -> tuple[float, float, int, int]:
     validity, effectiveness, n_correct_solution, n_incorrect_solution = efficiency_score(
         name = name,
-        n_sample = n_testcode,
         testcases = testcases,
-        timeout = timeout_dict[name],
     )
     return validity, effectiveness, n_correct_solution, n_incorrect_solution
 
+from statistics import mean
+from reward_model.utils.grammar.discriminator import discriminator
+from reward_model.utils.grammar.counting_context_free_grammar import CountingContextFreeGrammar as Ccfg
+
+def check_syntactic_validness(testcase: str, gt_grammar: dict) -> bool:
+    @timeout_decorator.timeout(10)  
+    def _check_syntactic_validness(testcase: str, grammar: dict) -> bool:
+        d = discriminator()
+        productions = grammar["productions"]
+        constraints = grammar["constraints"]
+        return d(productions, constraints, testcase)  
+    try:
+        return _check_syntactic_validness(testcase, gt_grammar)
+    except Exception as e:  
+        return False
+def calculate_validity(testcases: list[str], gt_grammar: dict) -> float:
+    parsable_cases = [check_syntactic_validness(testcase, gt_grammar) for testcase in testcases]
+    validity = mean(parsable_cases)
+    return validity
